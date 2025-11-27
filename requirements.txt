@@ -1,4 +1,6 @@
 streamlit
 pandas
+pandasai
+pandasai-litellm
 openpyxl
 xlsxwriter
