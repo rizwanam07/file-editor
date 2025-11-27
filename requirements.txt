@@ -4,3 +4,4 @@ pandasai
 pandasai-litellm
 openpyxl
 xlsxwriter
+matplotlib
