@@ -36,9 +36,15 @@ def rescue_dataframe(text_data):
 if "result_df" not in st.session_state:
     st.session_state.result_df = None
 
-# 4. API KEY INPUT
-api_key = "AIzaSyDJdQYb7fIGo973cJjwsXbcxVMDB6C-jAE"  # <--- PASTE YOUR REAL KEY HERE
-
+# 4. SECURE API KEY SETUP
+# This reads the key from Streamlit Secrets (set in the dashboard)
+# It will NOT crash if you accidentally push to GitHub, because the key isn't here.
+if "GOOGLE_API_KEY" in st.secrets:
+    api_key = st.secrets["GOOGLE_API_KEY"]
+else:
+    st.error("🚨 Missing API Key! Go to 'Manage App' -> 'Settings' -> 'Secrets' and add GOOGLE_API_KEY.")
+    st.stop()
+    
 # 5. FILE UPLOADER
 uploaded_file = st.file_uploader("Upload your data", type=["csv", "xlsx", "xls"])
 
@@ -242,3 +248,4 @@ if uploaded_file:
 
     except Exception as e:
         st.error(f"File Error: {e}")
+
