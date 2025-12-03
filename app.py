@@ -19,7 +19,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("📂 Auto-Detect File Editor (Cascading Filters)")
+st.title("📂 AI File Editor (Multi-Select Filters)")
 
 # 2. HELPER: RESCUE FUNCTION
 def rescue_dataframe(text_data):
@@ -32,94 +32,112 @@ def rescue_dataframe(text_data):
         except:
             return None
 
-# 3. SESSION STATE SETUP
+# 3. SESSION STATE MANAGEMENT
 if "result_df" not in st.session_state:
     st.session_state.result_df = None
+if "history" not in st.session_state:
+    st.session_state.history = []
 
-# 4. SECURE API KEY SETUP
-# This reads the key from Streamlit Secrets (set in the dashboard)
-# It will NOT crash if you accidentally push to GitHub, because the key isn't here.
+# 4. API KEY SETUP (SECURE)
+# The app will look for the key in Streamlit's encrypted secrets.
+# If it's not found (e.g., on GitHub), it will stop and ask for it.
 if "GOOGLE_API_KEY" in st.secrets:
     api_key = st.secrets["GOOGLE_API_KEY"]
 else:
-    st.error("🚨 Missing API Key! Go to 'Manage App' -> 'Settings' -> 'Secrets' and add GOOGLE_API_KEY.")
+    st.error("🚨 API Key missing! Please add GOOGLE_API_KEY to Streamlit Secrets.")
     st.stop()
-    
-# 5. FILE UPLOADER
+
+# 5. BUTTON CALLBACKS
+def clear_all():
+    for key in list(st.session_state.keys()):
+        if key.startswith("casc_") or key in ["result_df", "history"]:
+            del st.session_state[key]
+    st.session_state.result_df = None
+    st.session_state.history = []
+
+def undo_last():
+    if st.session_state.history:
+        st.session_state.result_df = st.session_state.history.pop()
+        st.toast("Undo Successful! Went back 1 step.", icon="↩️")
+    else:
+        st.warning("Nothing to undo!")
+
+# 6. FILE UPLOADER
 uploaded_file = st.file_uploader("Upload your data", type=["csv", "xlsx", "xls"])
 
 if uploaded_file:
-    # --- A. AUTO-DETECT FILE TYPE ---
+    # --- A. LOAD FILE (CHAINING LOGIC) ---
     file_extension = os.path.splitext(uploaded_file.name)[1].lower()
-    
     try:
         if file_extension == '.csv':
-            df = pd.read_csv(uploaded_file)
+            df_original = pd.read_csv(uploaded_file)
             file_type = "csv"
         elif file_extension in ['.xlsx', '.xls']:
-            df = pd.read_excel(uploaded_file)
+            df_original = pd.read_excel(uploaded_file)
             file_type = "excel"
         else:
             st.error("Unsupported file type!")
             st.stop()
-            
-        st.success(f"✅ Loaded {file_type.upper()} file successfully!")
+        
+        # Determine Current DataFrame (Editing the latest result)
+        if st.session_state.result_df is not None:
+            current_df = st.session_state.result_df
+            st.info(f"📍 Editing: **Step {len(st.session_state.history) + 1}** (Result of previous changes)")
+        else:
+            current_df = df_original
+            st.info("📍 Editing: **Original File**")
 
-        #unique countries
-        col = df.columns[df.columns.str.contains("country", case=False)][0]
-        n_unique_countries = df[col].nunique()
-
-        # --- B. FULL DATA PREVIEW ---
-        st.markdown(f"### 1️⃣ Original Data (Shape: {df.shape[0]} rows × {df.shape[1]} cols)")
-        with st.expander("View Full Data", expanded=True):
-            st.dataframe(df, use_container_width=True)
-
-        # --- C. CASCADING FILTER BUILDER (THE FIX) ---
+        # --- B. CASCADING FILTER BUILDER (MULTI-SELECT) ---
         st.divider()
         col_filter, col_action = st.columns([1, 1])
         
+        df_filtered = current_df.copy()
+        
         with col_filter:
-            st.markdown("### 2️⃣ Cascading Filters")
-            st.info("Select columns in order. Each dropdown filters the next one.")
+            st.markdown("### 1️⃣ Filter Data")
+            st.caption("Select multiple values to target specific rows.")
             
-            all_columns = df.columns.tolist()
-            # User selects which columns they want to filter by (Order matters!)
-            selected_filter_cols = st.multiselect("Select Filter Path (e.g. Brand -> Nameplate -> Program):", all_columns)
+            all_columns = current_df.columns.tolist()
+            selected_filter_cols = st.multiselect("Select Filter Path:", all_columns)
             
-            # --- CASCADING LOGIC ---
-            df_filtered = df.copy() # Start with full data
             filter_conditions = {}
-            
             if selected_filter_cols:
                 for col in selected_filter_cols:
-                    # Get unique values ONLY from the currently filtered data
+                    # Get values available in current filtered subset
                     available_values = sorted(df_filtered[col].astype(str).unique())
                     
-                    # Create dropdown
-                    selected_val = st.selectbox(f"Select {col}:", available_values, key=f"casc_{col}")
+                    # MULTI-SELECT WIDGET
+                    selected_vals = st.multiselect(f"Select {col}:", available_values, key=f"casc_{col}")
                     
-                    # Filter the dataframe immediately for the next loop iteration
-                    df_filtered = df_filtered[df_filtered[col].astype(str) == selected_val]
-                    
-                    # Store condition
-                    filter_conditions[col] = selected_val
-                
-                st.caption(f"ℹ️ Current Selection matches **{len(df_filtered)} rows**.")
-                if len(df_filtered) > n_unique_countries:
-                    st.warning(f"⚠️ Warning: You have selected more than {n_unique_countries} rows. Creating a variant might create duplicates if you don't filter further.")
+                    # Update Filter Logic
+                    if selected_vals:
+                        # Filter dataframe to keep rows where column value matches ANY of the selected values
+                        df_filtered = df_filtered[df_filtered[col].astype(str).isin(selected_vals)]
+                        filter_conditions[col] = selected_vals
+                    else:
+                        # If nothing selected, we assume "All" for this step, but don't filter 'df_filtered' further
+                        pass
             
-            # Construct WHERE clause
+            # Construct Prompt String (handling lists)
             if filter_conditions:
-                conditions_str = " and ".join([f"{k} is '{v}'" for k, v in filter_conditions.items()])
+                # Creates string like: "Brand in ['Audi', 'BMW'] and Country in ['France']"
+                conditions_str = " and ".join([f"{k} in {v}" for k, v in filter_conditions.items()])
             else:
                 conditions_str = "(No filter selected - Apply to ALL rows)"
 
+        # --- C. LIVE PREVIEW (TARGETED ROWS) ---
+        # Show exactly what rows are currently targeted
+        with st.expander(f"🔎 Targeted Data Preview: {len(df_filtered)} rows selected", expanded=True):
+            st.dataframe(df_filtered, use_container_width=True)
+
         # --- D. CHOOSE ACTION ---
         with col_action:
-            st.markdown("### 3️⃣ Choose Action")
+            st.markdown("### 2️⃣ Choose Action")
             action_type = st.radio("Action Type:", ["➕ Add New Variant", "✏️ Replace Value"], horizontal=True)
             
-            # Column Selector
+            country_col = next((c for c in current_df.columns if "country" in c.lower() or "region" in c.lower()), None)
+            
+            # Target Column
             default_ix = 0
             for i, c in enumerate(all_columns):
                 if "power" in c.lower() or "kw" in c.lower():
@@ -128,22 +146,36 @@ if uploaded_file:
             target_col = st.selectbox("Column to Change:", all_columns, index=default_ix)
             
             # Value Selector
-            existing_values = sorted([str(x) for x in df[target_col].dropna().unique().tolist()])
-            value_options = ["(Type Custom Value...)"] + existing_values
-            
+            if not df_filtered.empty:
+                relevant_values = sorted([str(x) for x in df_filtered[target_col].dropna().unique().tolist()])
+            else:
+                relevant_values = []
+                
+            value_options = ["(Type Custom Value...)"] + relevant_values
             selected_val_opt = st.selectbox(f"Select New Value for '{target_col}':", value_options)
             
             if selected_val_opt == "(Type Custom Value...)":
                 final_value = st.text_input(f"Type custom value for '{target_col}':")
             else:
                 final_value = selected_val_opt
-                
-            # DEDUPLICATION OPTION
+
+            # DEDUPLICATION / COUNTRY LOGIC
             dedup_instruction = ""
             if action_type == "➕ Add New Variant":
-                dedup = st.checkbox("Ensure unique row per Country? (Prevents duplicates)", value=True)
-                if dedup:
-                    dedup_instruction = "IMPORTANT: Before copying, group the source rows by 'Sales Country' (or 'Country') and pick only ONE row per country to copy. This ensures we do not create duplicate variants."
+                if country_col and not df_filtered.empty:
+                    unique_countries = df_filtered[country_col].unique().tolist()
+                    count_countries = len(unique_countries)
+                    
+                    if count_countries > 0:
+                        st.success(f"🌍 Detected **{count_countries} Unique Countries** in selection.")
+                        # Strict prompt to handle the multi-selected countries
+                        dedup_instruction = (
+                            f"IMPORTANT: The source rows cover {count_countries} unique countries: {unique_countries}. "
+                            f"You must create exactly {count_countries} new rows (ONE per country). "
+                            f"Group the source rows by '{country_col}' and pick one representative row per country to copy."
+                        )
+                    else:
+                        st.warning("Selection is empty.")
 
         # --- PROMPT GENERATION ---
         if action_type == "➕ Add New Variant":
@@ -151,16 +183,27 @@ if uploaded_file:
         else:
             base_prompt = f"Find rows where {conditions_str}. UPDATE these rows by setting '{target_col}' to '{final_value}'."
 
-        # --- E. SETUP AI ---
-        llm = LiteLLM(model="gemini/gemini-2.5-flash", api_key=api_key)
-        sdf = SmartDataframe(df, config={"llm": llm, "conversational": False})
-
-        # --- F. RUN INTERFACE ---
+        # --- E. RUN INTERFACE ---
         st.divider()
-        st.markdown("### 4️⃣ Review & Run")
+        st.markdown("### 3️⃣ Review & Run")
         query = st.text_area("AI Instructions:", value=base_prompt, height=100)
         
-        if st.button("🚀 Run AI Edits", type="primary"):
+        b_col1, b_col2, b_col3 = st.columns([1, 0.5, 3])
+        with b_col1:
+            run_clicked = st.button("🚀 Run AI Edits", type="primary", use_container_width=True)
+        with b_col2:
+            undo_disabled = len(st.session_state.history) == 0
+            undo_clicked = st.button("↩️ Undo", on_click=undo_last, disabled=undo_disabled, use_container_width=True)
+        with b_col3:
+            reset_clicked = st.button("🔄 Reset All", on_click=clear_all)
+
+        # --- F. AI EXECUTION ---
+        if run_clicked:
+            st.session_state.history.append(current_df.copy()) # Save History
+            
+            llm = LiteLLM(model="gemini/gemini-2.5-flash", api_key=api_key)
+            sdf = SmartDataframe(current_df, config={"llm": llm, "conversational": False})
+            
             with st.spinner("AI is processing..."):
                 try:
                     temp_file = "temp_ai_output.csv"
@@ -171,8 +214,8 @@ if uploaded_file:
                     2. Save the result to a CSV file named '{temp_file}' using: df.to_csv('{temp_file}', index=False)
                     3. Do NOT return the dataframe text.
                     4. The last line of your code must be: print("SAVED")
+                    5. Changes should be merge with the full file
                     """
-                    
                     sdf.chat(strict_query)
                     
                     if os.path.exists(temp_file):
@@ -182,20 +225,19 @@ if uploaded_file:
                         os.remove(temp_file)
                         st.rerun()
                     else:
-                        st.error("The AI claimed it finished, but no output file was created.")
-
+                        st.error("The AI finished, but no output file was created.")
                 except Exception as e:
                     st.error(f"AI Error: {e}")
 
         # --- G. RESULT & DOWNLOAD ---
         if st.session_state.result_df is not None:
             result_df = st.session_state.result_df
-            
             st.divider()
-            st.markdown(f"### 5️⃣ Result (Effective Changes)")
+            st.markdown(f"### 4️⃣ Result (Total Rows: {len(result_df)})")
             
             try:
-                original_len = len(df)
+                # Compare vs Original to find effective changes
+                original_len = len(df_original)
                 result_len = len(result_df)
                 
                 added_rows = pd.DataFrame()
@@ -204,10 +246,11 @@ if uploaded_file:
                     added_rows.insert(0, "Status", "🆕 Added")
 
                 min_len = min(original_len, result_len)
-                df_orig_slice = df.iloc[:min_len].reset_index(drop=True)
+                df_orig_slice = df_original.iloc[:min_len].reset_index(drop=True)
                 df_res_slice = result_df.iloc[:min_len].reset_index(drop=True)
                 
                 common_cols = df_orig_slice.columns.intersection(df_res_slice.columns)
+                # Robust comparison handling NaNs
                 mask_diff = (df_orig_slice[common_cols].fillna("##") != df_res_slice[common_cols].fillna("##")).any(axis=1)
                 
                 modified_rows = result_df.iloc[:min_len][mask_diff].copy()
@@ -217,13 +260,12 @@ if uploaded_file:
                 effective_changes = pd.concat([modified_rows, added_rows])
 
                 if not effective_changes.empty:
-                    st.success(f"✅ Found {len(effective_changes)} effective changes.")
+                    st.success(f"✅ Found {len(effective_changes)} effective changes (vs Original).")
                     st.dataframe(effective_changes, use_container_width=True)
                 else:
-                    st.warning("No effective changes detected.")
+                    st.warning("No effective changes detected vs Original.")
 
             except Exception as e:
-                st.error(f"Diff Error: {e}")
                 st.dataframe(result_df.tail())
 
             if file_type == "csv":
@@ -248,4 +290,3 @@ if uploaded_file:
 
     except Exception as e:
         st.error(f"File Error: {e}")
-
